@@ -1,0 +1,139 @@
+import type { Namespace } from "socket.io";
+import { z } from "zod";
+import { COOKIE_NAME, getCookieValue, verifyToken } from "./auth";
+import { db } from "./db";
+import { areFriends } from "./friendship";
+import { messages } from "./schema";
+
+const sendMessageSchema = z.object({
+  receiverId: z.string().uuid("Invalid receiver id"),
+  content: z
+    .string()
+    .trim()
+    .min(1, "Message cannot be empty")
+    .max(2000, "Message is too long"),
+});
+
+type PrivateSocketData = {
+  userId: string;
+};
+
+function userRoom(userId: string) {
+  return `user:${userId}`;
+}
+
+export function setupPrivateChat(io: Namespace) {
+  const onlineSockets = new Map<string, Set<string>>();
+
+  function broadcastOnlineUsers() {
+    io.emit("online_users", [...onlineSockets.keys()]);
+  }
+
+  // The socket handshake contains the same HttpOnly cookie as normal requests.
+  io.use(async (socket, next) => {
+    const token = getCookieValue(socket.handshake.headers.cookie, COOKIE_NAME);
+
+    if (!token) {
+      next(new Error("Unauthorized"));
+      return;
+    }
+
+    const userId = await verifyToken(token);
+
+    if (!userId) {
+      next(new Error("Unauthorized"));
+      return;
+    }
+
+    socket.data.userId = userId;
+    next();
+  });
+
+  io.on("connection", (socket) => {
+    const userId = (socket.data as PrivateSocketData).userId;
+
+    socket.join(userRoom(userId));
+
+    let userSockets = onlineSockets.get(userId);
+
+    if (!userSockets) {
+      userSockets = new Set();
+      onlineSockets.set(userId, userSockets);
+    }
+     
+    userSockets.add(socket.id);
+    broadcastOnlineUsers();
+
+    console.log("Private chat connected:", userId);
+
+    socket.on("send_message", async (payload) => {
+      try {
+        const result = sendMessageSchema.safeParse(payload);
+
+        if (!result.success) {
+          socket.emit("chat_error", {
+            message: result.error.issues[0]?.message ?? "Invalid message",
+          });
+          return;
+        }
+
+        const { receiverId, content } = result.data;
+
+        if (receiverId === userId) {
+          socket.emit("chat_error", {
+            message: "You cannot message yourself",
+          });
+          return;
+        }
+        
+        if (!(await areFriends(userId, receiverId))) {
+          socket.emit("chat_error", {
+            message: "You can only message friends",
+          });
+          return;
+        }
+        if(!content.trim()){
+          socket.emit("chat_error", {
+            message: "Message cannot be empty",
+          });
+          return;
+        }
+
+        const [savedMessage] = await db
+          .insert(messages)
+          .values({
+            senderId: userId,
+            receiverId,
+            content,
+          })
+          .returning();
+
+        io.to(userRoom(userId))
+          .to(userRoom(receiverId))
+          .emit("receive_message", savedMessage);
+      } catch (error) {
+        console.error("Failed to send message:", error);
+        socket.emit("chat_error", {
+          message: "Message could not be sent",
+        });
+      }
+    });
+
+    socket.on("disconnect", () => {
+      const sockets = onlineSockets.get(userId);
+
+      if (!sockets) {
+        return;
+      }
+
+      sockets.delete(socket.id);
+
+      if (sockets.size === 0) {
+        onlineSockets.delete(userId);
+      }
+
+      broadcastOnlineUsers();
+      console.log("Private chat disconnected:", userId);
+    });
+  });
+}

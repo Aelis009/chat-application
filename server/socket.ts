@@ -1,9 +1,9 @@
 import type { Namespace } from "socket.io";
 import { z } from "zod";
-import { COOKIE_NAME, getCookieValue, verifyToken } from "./auth";
-import { db } from "./db";
-import { areFriends } from "./friendship";
-import { messages } from "./schema";
+import { COOKIE_NAME, getCookieValue, verifyToken } from "./auth.js";
+import { db } from "./db.js";
+import { areFriends } from "./friendship.js";
+import { messages } from "./schema.js";
 
 const sendMessageSchema = z.object({
   receiverId: z.string().uuid("Invalid receiver id"),

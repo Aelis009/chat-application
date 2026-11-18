@@ -1,8 +1,8 @@
 import "dotenv/config";
 import type { Server as HTTPServer } from "node:http";
 import { serve } from "@hono/node-server";
-import { app } from "./app";
-import { createRealtime } from "./realtime";
+import { app } from "./app.js";
+import { createRealtime } from "./realtime.js";
 
 const port = 4000;
 

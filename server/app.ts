@@ -3,10 +3,10 @@ import { cors } from "hono/cors";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { and, desc, eq, inArray, ne, or } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "./db";
-import { friendRequests, messages, users } from "./schema";
-import { areFriends } from "./friendship";
-import { getAllowedOrigins } from "./cors";
+import { db } from "./db.js";
+import { friendRequests, messages, users } from "./schema.js";
+import { areFriends } from "./friendship.js";
+import { getAllowedOrigins } from "./cors.js";
 import {
   authMiddleware,
   COOKIE_NAME,
@@ -15,7 +15,7 @@ import {
   hashPassword,
   verifyPassword,
   type AuthVariables,
-} from "./auth";
+} from "./auth.js";
 
 export const app = new Hono<{ Variables: AuthVariables }>();
 

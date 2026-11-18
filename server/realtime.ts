@@ -1,9 +1,9 @@
 import type { Server as HTTPServer } from "node:http";
 import { createAdapter } from "@socket.io/redis-adapter";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { Server } from "socket.io";
-import { getAllowedOrigins } from "./cors";
-import { setupPrivateChat } from "./socket";
+import { getAllowedOrigins } from "./cors.js";
+import { setupPrivateChat } from "./socket.js";
 
 // One Redis connection publishes, the other subscribes. The adapter forwards
 // events between Vercel Function instances, not just within one instance.

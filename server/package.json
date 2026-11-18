@@ -13,7 +13,7 @@
     "db:seed": "tsx seed.ts"
   },
   "keywords": [],
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
     "@hono/node-server": "^2.1.8",
     "@neondatabase/serverless": "^1.2.1",

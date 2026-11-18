@@ -22,13 +22,13 @@ export default function RegisterPage() {
     setSubmitting(true);
 
     try {
-      await apiFetch<AuthResponse>("/api/auth/register", {
+      await apiFetch<AuthResponse>("/v1/auth/register", {
         method: "POST",
         body: JSON.stringify({ name: name.trim(), email, password }),
       });
 
       try {
-        await apiFetch<AuthResponse>("/api/auth/login", {
+        await apiFetch<AuthResponse>("/v1/auth/login", {
           method: "POST",
           body: JSON.stringify({ email, password }),
         });

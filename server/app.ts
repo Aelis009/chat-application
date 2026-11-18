@@ -115,7 +115,7 @@ app.get("/", (c) => {
   return c.json({ message: "Chat API is running" });
 });
 
-app.post("/api/auth/register", async (c) => {
+app.post("/v1/auth/register", async (c) => {
   const body = await c.req.json().catch(() => null);
   const result = registerSchema.safeParse(body);
 
@@ -164,7 +164,7 @@ app.post("/api/auth/register", async (c) => {
   );
 });
 
-app.post("/api/auth/login", async (c) => {
+app.post("/v1/auth/login", async (c) => {
   const body = await c.req.json().catch(() => null);
   const result = loginSchema.safeParse(body);
 
@@ -211,7 +211,7 @@ app.post("/api/auth/login", async (c) => {
   });
 });
 
-app.post("/api/auth/logout", (c) => {
+app.post("/v1/auth/logout", (c) => {
   const isProduction = process.env.NODE_ENV === "production";
 
   deleteCookie(c, COOKIE_NAME, {
@@ -223,7 +223,7 @@ app.post("/api/auth/logout", (c) => {
   return c.json({ message: "Logged out" });
 });
 
-app.get("/api/auth/me", authMiddleware, async (c) => {
+app.get("/v1/auth/me", authMiddleware, async (c) => {
   const userId = c.get("userId");
 
   const user = await db.query.users.findFirst({
@@ -245,7 +245,7 @@ app.get("/api/auth/me", authMiddleware, async (c) => {
 
 // ---------- Users ----------
 
-app.get("/api/users", authMiddleware, async (c) => {
+app.get("/v1/users", authMiddleware, async (c) => {
   const me = c.get("userId");
 
   const userRows = await db
@@ -293,7 +293,7 @@ app.get("/api/users", authMiddleware, async (c) => {
 
 // ---------- Friend requests ----------
 
-app.post("/api/friend-requests", authMiddleware, async (c) => {
+app.post("/v1/friend-requests", authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => null);
   const result = sendFriendRequestSchema.safeParse(body);
 
@@ -384,7 +384,7 @@ app.post("/api/friend-requests", authMiddleware, async (c) => {
 });
 
 
-app.get("/api/friend-requests", authMiddleware, async (c) => {
+app.get("/v1/friend-requests", authMiddleware, async (c) => {
   const me = c.get("userId");
 
   const incomingRows = await db
@@ -433,7 +433,7 @@ app.get("/api/friend-requests", authMiddleware, async (c) => {
 
 
 
-app.post("/api/friend-requests/:id/accept", authMiddleware, async (c) => {
+app.post("/v1/friend-requests/:id/accept", authMiddleware, async (c) => {
   const parsedId = friendRequestIdSchema.safeParse(c.req.param("id"));
 
   if (!parsedId.success) {
@@ -456,7 +456,7 @@ app.post("/api/friend-requests/:id/accept", authMiddleware, async (c) => {
   });
 });
 
-app.post("/api/friend-requests/:id/decline", authMiddleware, async (c) => {
+app.post("/v1/friend-requests/:id/decline", authMiddleware, async (c) => {
   const parsedId = friendRequestIdSchema.safeParse(c.req.param("id"));
 
   if (!parsedId.success) {
@@ -481,7 +481,7 @@ app.post("/api/friend-requests/:id/decline", authMiddleware, async (c) => {
 
 // ---------- Friends ----------
 
-app.get("/api/friends", authMiddleware, async (c) => {
+app.get("/v1/friends", authMiddleware, async (c) => {
   const me = c.get("userId");
 
   const acceptedRows = await db
@@ -513,7 +513,7 @@ app.get("/api/friends", authMiddleware, async (c) => {
 
 // ---------- Messages ----------
 
-app.get("/api/messages/:friendId", authMiddleware, async (c) => {
+app.get("/v1/messages/:friendId", authMiddleware, async (c) => {
   const me = c.get("userId");
   const parsedFriendId = friendIdSchema.safeParse(c.req.param("friendId"));
 

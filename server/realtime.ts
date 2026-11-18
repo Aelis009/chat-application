@@ -32,9 +32,11 @@ function attachRedisAdapter(io: Server) {
 
 export function createRealtime(httpServer: HTTPServer) {
   const io = new Server(httpServer, {
-    // The client uses the same path. On Vercel this becomes:
-    // /api/socket-io/socket.io
-    path: "/socket.io",
+    // Keep the local Socket.IO path unchanged and use the Vercel function
+    // route when deployed. The namespace (/private) remains separate.
+    path: process.env.VERCEL
+      ? "/api/socket-io/socket.io"
+      : "/socket.io",
     // Vercel WebSocket Functions cannot use Socket.IO's HTTP long-polling
     // handshake because every request may land on a different instance.
     transports: ["websocket"],

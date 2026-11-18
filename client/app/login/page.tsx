@@ -21,7 +21,7 @@ export default function LoginPage() {
     setSubmitting(true);
 
     try {
-      await apiFetch<AuthResponse>("/api/auth/login", {
+      await apiFetch<AuthResponse>("/v1/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });

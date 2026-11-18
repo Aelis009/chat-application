@@ -28,9 +28,9 @@ type ListsData = {
 
 async function fetchLists(): Promise<ListsData> {
   const [usersResponse, requestsResponse, friendsResponse] = await Promise.all([
-    apiFetch<UsersResponse>("/api/users"),
-    apiFetch<FriendRequestsResponse>("/api/friend-requests"),
-    apiFetch<FriendsResponse>("/api/friends"),
+    apiFetch<UsersResponse>("/v1/users"),
+    apiFetch<FriendRequestsResponse>("/v1/friend-requests"),
+    apiFetch<FriendsResponse>("/v1/friends"),
   ]);
 
   return {
@@ -125,7 +125,7 @@ export default function ChatPage() {
       let redirecting = false;
 
       try {
-        const meResponse = await apiFetch<MeResponse>("/api/auth/me");
+        const meResponse = await apiFetch<MeResponse>("/v1/auth/me");
 
         if (cancelled) {
           return;
@@ -264,7 +264,7 @@ export default function ChatPage() {
 
     let cancelled = false;
 
-    apiFetch<MessagesResponse>(`/api/messages/${selectedFriend.id}`)
+    apiFetch<MessagesResponse>(`/v1/messages/${selectedFriend.id}`)
       .then((response) => {
         if (cancelled) {
           return;
@@ -378,7 +378,7 @@ export default function ChatPage() {
 
     try {
       await apiFetch<{ message: string }>(
-        `/api/friend-requests/${requestId}/accept`,
+        `/v1/friend-requests/${requestId}/accept`,
         { method: "POST" }
       );
 
@@ -400,7 +400,7 @@ export default function ChatPage() {
 
     try {
       await apiFetch<{ message: string }>(
-        `/api/friend-requests/${requestId}/decline`,
+        `/v1/friend-requests/${requestId}/decline`,
         { method: "POST" }
       );
 
@@ -417,7 +417,7 @@ export default function ChatPage() {
     setError(null);
 
     try {
-      await apiFetch<{ message: string }>("/api/friend-requests", {
+      await apiFetch<{ message: string }>("/v1/friend-requests", {
         method: "POST",
         body: JSON.stringify({ receiverId }),
       });
@@ -472,7 +472,7 @@ export default function ChatPage() {
     setError(null);
 
     try {
-      await apiFetch<{ message: string }>("/api/auth/logout", {
+      await apiFetch<{ message: string }>("/v1/auth/logout", {
         method: "POST",
       });
 

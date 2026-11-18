@@ -190,7 +190,19 @@ export default function ChatPage() {
     });
     socketRef.current = socket;
 
+    socket.io.on("error", (error) => {
+      console.error("[Socket.IO] Manager error:", error);
+    });
+
+    socket.io.engine.on("error", (error) => {
+      console.error("[Socket.IO] Transport error:", error);
+    });
+
     function handleConnect() {
+      console.info("[Socket.IO] Connected", {
+        url: `${SOCKET_URL}/private`,
+        path: SOCKET_PATH,
+      });
       setSocketConnected(true);
       setChatError(null);
       // Vercel closes long-lived connections at the function's max duration.
@@ -200,6 +212,7 @@ export default function ChatPage() {
     }
 
     function handleDisconnect() {
+      console.warn("[Socket.IO] Disconnected");
       setSocketConnected(false);
       setOnlineUserIds([]);
     }
@@ -232,6 +245,11 @@ export default function ChatPage() {
     }
 
     function handleConnectError(connectError: Error) {
+      console.error("[Socket.IO] Connection error", {
+        message: connectError.message,
+        url: `${SOCKET_URL}/private`,
+        path: SOCKET_PATH,
+      });
       setSocketConnected(false);
       setOnlineUserIds([]);
 

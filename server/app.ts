@@ -6,6 +6,7 @@ import { z } from "zod";
 import { db } from "./db";
 import { friendRequests, messages, users } from "./schema";
 import { areFriends } from "./friendship";
+import { getAllowedOrigins } from "./cors";
 import {
   authMiddleware,
   COOKIE_NAME,
@@ -21,7 +22,7 @@ export const app = new Hono<{ Variables: AuthVariables }>();
 app.use(
   "*",
   cors({
-    origin: "http://localhost:3000",
+    origin: getAllowedOrigins(),
     credentials: true,
   })
 );
@@ -188,11 +189,14 @@ app.post("/api/auth/login", async (c) => {
   }
 
   const token = await createToken(user.id);
+  const isProduction = process.env.NODE_ENV === "production";
 
   setCookie(c, COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "Lax",
-    secure: process.env.NODE_ENV === "production",
+    // The Vercel frontend and API are on different sites, so production
+    // needs SameSite=None. Local development stays on Lax over HTTP.
+    sameSite: isProduction ? "None" : "Lax",
+    secure: isProduction,
     path: "/",
     maxAge: TOKEN_MAX_AGE_SECONDS,
   });
@@ -208,7 +212,14 @@ app.post("/api/auth/login", async (c) => {
 });
 
 app.post("/api/auth/logout", (c) => {
-  deleteCookie(c, COOKIE_NAME, { path: "/" });
+  const isProduction = process.env.NODE_ENV === "production";
+
+  deleteCookie(c, COOKIE_NAME, {
+    path: "/",
+    secure: isProduction,
+    sameSite: isProduction ? "None" : "Lax",
+  });
+
   return c.json({ message: "Logged out" });
 });
 
@@ -537,3 +548,6 @@ app.get("/api/messages/:friendId", authMiddleware, async (c) => {
 
   return c.json({ messages: messageRows.reverse() });
 });
+
+// Vercel's zero-configuration Hono integration uses this default export.
+export default app;

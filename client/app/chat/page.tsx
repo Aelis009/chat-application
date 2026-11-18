@@ -7,8 +7,9 @@ import type { FormEvent } from "react";
 import { io, type Socket } from "socket.io-client";
 import Brand from "@/components/Brand";
 import {
-  API_URL,
   ApiError,
+  SOCKET_PATH,
+  SOCKET_URL,
   apiFetch,
   type FriendRequestsResponse,
   type FriendsResponse,
@@ -115,6 +116,7 @@ export default function ChatPage() {
   const [actionId, setActionId] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,14 +178,25 @@ export default function ChatPage() {
     }
 
     const currentUserId = me.id;
-    const socket = io(`${API_URL}/private`, {
+    const socket = io(`${SOCKET_URL}/private`, {
+      path: SOCKET_PATH,
+      // Vercel WebSocket Functions require the WebSocket transport directly.
+      // HTTP long-polling needs sticky sessions, which Vercel does not provide.
+      transports: ["websocket"],
       withCredentials: true,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 30000,
     });
     socketRef.current = socket;
 
     function handleConnect() {
       setSocketConnected(true);
       setChatError(null);
+      // Vercel closes long-lived connections at the function's max duration.
+      // Reload the open conversation after every reconnect so messages sent
+      // while the socket was down are not missing.
+      setHistoryVersion((version) => version + 1);
     }
 
     function handleDisconnect() {
@@ -303,7 +316,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedFriend, router]);
+  }, [selectedFriend, router, historyVersion]);
 
   const selectedFriendId = selectedFriend?.id ?? null;
   const onlineUserIdsSet = new Set(onlineUserIds);

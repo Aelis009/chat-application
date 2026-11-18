@@ -23,10 +23,27 @@ function userRoom(userId: string) {
 }
 
 export function setupPrivateChat(io: Namespace) {
-  const onlineSockets = new Map<string, Set<string>>();
+  // fetchSockets() reads through the active adapter. With the Redis adapter
+  // enabled, this includes sockets connected to other Vercel instances.
+  async function broadcastOnlineUsers() {
+    try {
+      const sockets = await io.fetchSockets();
 
-  function broadcastOnlineUsers() {
-    io.emit("online_users", [...onlineSockets.keys()]);
+      const onlineUserIds = [
+        ...new Set(
+          sockets
+            .map(
+              (connectedSocket) =>
+                (connectedSocket.data as PrivateSocketData).userId
+            )
+            .filter((userId): userId is string => Boolean(userId))
+        ),
+      ];
+
+      io.emit("online_users", onlineUserIds);
+    } catch (error) {
+      console.error("Failed to broadcast online users:", error);
+    }
   }
 
   // The socket handshake contains the same HttpOnly cookie as normal requests.
@@ -53,16 +70,7 @@ export function setupPrivateChat(io: Namespace) {
     const userId = (socket.data as PrivateSocketData).userId;
 
     socket.join(userRoom(userId));
-
-    let userSockets = onlineSockets.get(userId);
-
-    if (!userSockets) {
-      userSockets = new Set();
-      onlineSockets.set(userId, userSockets);
-    }
-     
-    userSockets.add(socket.id);
-    broadcastOnlineUsers();
+    void broadcastOnlineUsers();
 
     console.log("Private chat connected:", userId);
 
@@ -120,19 +128,7 @@ export function setupPrivateChat(io: Namespace) {
     });
 
     socket.on("disconnect", () => {
-      const sockets = onlineSockets.get(userId);
-
-      if (!sockets) {
-        return;
-      }
-
-      sockets.delete(socket.id);
-
-      if (sockets.size === 0) {
-        onlineSockets.delete(userId);
-      }
-
-      broadcastOnlineUsers();
+      void broadcastOnlineUsers();
       console.log("Private chat disconnected:", userId);
     });
   });

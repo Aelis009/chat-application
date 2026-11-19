@@ -6,7 +6,7 @@ import { createMiddleware } from "hono/factory";
 
 export const COOKIE_NAME = "token";
 
-export const TOKEN_MAX_AGE_SECONDS = 60 * 60;
+export const TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24;
 
 const jwtSecret = process.env.JWT_SECRET;
 

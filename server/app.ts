@@ -224,8 +224,6 @@ app.post("/v1/auth/login", async (c) => {
 
   setCookie(c, COOKIE_NAME, token, {
     httpOnly: true,
-    // The Vercel frontend and API are on different sites, so production
-    // needs SameSite=None. Local development stays on Lax over HTTP.
     sameSite: isProduction ? "None" : "Lax",
     secure: isProduction,
     path: "/",

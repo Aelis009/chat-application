@@ -43,6 +43,14 @@ const loginSchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
+const profileSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(2, "Name must be at least 2 characters")
+    .max(100, "Name must be at most 100 characters"),
+});
+
 const sendFriendRequestSchema = z.object({
   receiverId: z.string().uuid("Invalid user id"),
 });
@@ -264,6 +272,40 @@ app.get("/v1/auth/me", authMiddleware, async (c) => {
   }
 
   return c.json({ user });
+});
+
+app.patch("/v1/profile", authMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const result = profileSchema.safeParse(body);
+
+  if (!result.success) {
+    return c.json(
+      {
+        error: "Please check your profile",
+      },
+      400
+    );
+  }
+
+  const [user] = await db
+    .update(users)
+    .set({ name: result.data.name })
+    .where(eq(users.id, c.get("userId")))
+    .returning({
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      createdAt: users.createdAt,
+    });
+
+  if (!user) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  return c.json({
+    message: "Profile updated",
+    user,
+  });
 });
 
 // ---------- Users ----------

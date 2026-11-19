@@ -68,6 +68,11 @@ export type AuthResponse = {
   user: User;
 };
 
+export type ProfileResponse = {
+  message: string;
+  user: User;
+};
+
 export type UsersResponse = {
   users: User[];
 };

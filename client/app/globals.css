@@ -1080,6 +1080,18 @@ a {
   font-weight: 600;
 }
 
+.profile-edit-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.profile-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .profile-hint {
   margin: 0;
 }

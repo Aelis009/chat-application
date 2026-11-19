@@ -45,7 +45,18 @@ export type Message = {
   senderId: string;
   receiverId: string;
   content: string;
+  readAt?: string | null;
   createdAt: string;
+};
+
+export type Conversation = {
+  friend: User;
+  lastMessage: Message | null;
+  unreadCount: number;
+};
+
+export type ConversationsResponse = {
+  conversations: Conversation[];
 };
 
 export type MeResponse = {

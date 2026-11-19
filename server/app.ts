@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { deleteCookie, setCookie } from "hono/cookie";
-import { and, desc, eq, inArray, ne, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db.js";
 import { friendRequests, messages, users } from "./schema.js";
@@ -109,6 +109,29 @@ async function updateFriendRequestStatus(
     .returning();
 
   return { request: updatedRequest };
+}
+
+async function getAcceptedFriendIds(userId: string) {
+  const acceptedRows = await db
+    .select()
+    .from(friendRequests)
+    .where(
+      and(
+        eq(friendRequests.status, "accepted"),
+        or(
+          eq(friendRequests.senderId, userId),
+          eq(friendRequests.receiverId, userId)
+        )
+      )
+    );
+
+  return [
+    ...new Set(
+      acceptedRows.map((row) =>
+        row.senderId === userId ? row.receiverId : row.senderId
+      )
+    ),
+  ];
 }
 
 app.get("/", (c) => {
@@ -479,29 +502,51 @@ app.post("/v1/friend-requests/:id/decline", authMiddleware, async (c) => {
   });
 });
 
+app.delete("/v1/friend-requests/:id", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const parsedId = friendRequestIdSchema.safeParse(c.req.param("id"));
+
+  if (!parsedId.success) {
+    return c.json({ error: "Invalid friend request id" }, 400);
+  }
+
+  const request = await db.query.friendRequests.findFirst({
+    where: eq(friendRequests.id, parsedId.data),
+  });
+
+  if (!request) {
+    return c.json({ error: "Friend request not found" }, 404);
+  }
+
+  if (request.senderId !== me) {
+    return c.json(
+      { error: "Only the sender can cancel this friend request" },
+      403
+    );
+  }
+
+  if (request.status !== "pending") {
+    return c.json(
+      { error: "This friend request is no longer pending" },
+      409
+    );
+  }
+
+  await db
+    .delete(friendRequests)
+    .where(eq(friendRequests.id, request.id));
+
+  return c.json({
+    message: "Friend request cancelled",
+    requestId: request.id,
+  });
+});
+
 // ---------- Friends ----------
 
 app.get("/v1/friends", authMiddleware, async (c) => {
   const me = c.get("userId");
-
-  const acceptedRows = await db
-    .select()
-    .from(friendRequests)
-    .where(
-      and(
-        eq(friendRequests.status, "accepted"),
-        or(eq(friendRequests.senderId, me), eq(friendRequests.receiverId, me))
-      )
-    );
-
-  const friendIds = [
-    ...new Set(
-      acceptedRows.map((row) =>
-        row.senderId === me ? row.receiverId : row.senderId
-      )
-    ),
-  ];
-
+  const friendIds = await getAcceptedFriendIds(me);
   const friendUsers = await getUsersByIds(friendIds);
 
   const friends = friendIds
@@ -509,6 +554,187 @@ app.get("/v1/friends", authMiddleware, async (c) => {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   return c.json({ friends });
+});
+
+app.delete("/v1/friends/:friendId", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const parsedFriendId = friendIdSchema.safeParse(c.req.param("friendId"));
+
+  if (!parsedFriendId.success) {
+    return c.json({ error: "Invalid friend id" }, 400);
+  }
+
+  const friendId = parsedFriendId.data;
+
+  if (friendId === me) {
+    return c.json({ error: "You cannot remove yourself as a friend" }, 400);
+  }
+
+  const deletedRows = await db
+    .delete(friendRequests)
+    .where(
+      and(
+        eq(friendRequests.status, "accepted"),
+        or(
+          and(
+            eq(friendRequests.senderId, me),
+            eq(friendRequests.receiverId, friendId)
+          ),
+          and(
+            eq(friendRequests.senderId, friendId),
+            eq(friendRequests.receiverId, me)
+          )
+        )
+      )
+    )
+    .returning({ id: friendRequests.id });
+
+  if (deletedRows.length === 0) {
+    return c.json({ error: "Friendship not found" }, 404);
+  }
+
+  return c.json({
+    message: "Friend removed",
+    removedFriendId: friendId,
+  });
+});
+
+// ---------- Conversations ----------
+
+app.get("/v1/conversations", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const friendIds = await getAcceptedFriendIds(me);
+
+  if (friendIds.length === 0) {
+    return c.json({ conversations: [] });
+  }
+
+  const friendUsers = await getUsersByIds(friendIds);
+  const friendIdSet = new Set(friendIds);
+  const friends = friendIds
+    .map((friendId) => friendUsers.get(friendId)!)
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const [latestMessageRows, unreadRows] = await Promise.all([
+    db
+      .select({
+        id: messages.id,
+        senderId: messages.senderId,
+        receiverId: messages.receiverId,
+        content: messages.content,
+        readAt: messages.readAt,
+        createdAt: messages.createdAt,
+      })
+      .from(messages)
+      .where(or(eq(messages.senderId, me), eq(messages.receiverId, me)))
+      .orderBy(desc(messages.createdAt)),
+    db
+      .select({
+        senderId: messages.senderId,
+        unreadCount: sql<number>`count(*)::int`,
+      })
+      .from(messages)
+      .where(and(eq(messages.receiverId, me), isNull(messages.readAt)))
+      .groupBy(messages.senderId),
+  ]);
+
+  const latestMessageByFriend = new Map<
+    string,
+    {
+      id: string;
+      senderId: string;
+      receiverId: string;
+      content: string;
+      readAt: Date | null;
+      createdAt: Date;
+    }
+  >();
+
+  for (const row of latestMessageRows) {
+    const otherUserId =
+      row.senderId === me ? row.receiverId : row.senderId;
+
+    if (
+      !friendIdSet.has(otherUserId) ||
+      latestMessageByFriend.has(otherUserId)
+    ) {
+      continue;
+    }
+
+    latestMessageByFriend.set(otherUserId, {
+      id: row.id,
+      senderId: row.senderId,
+      receiverId: row.receiverId,
+      content: row.content,
+      readAt: row.readAt,
+      createdAt: row.createdAt,
+    });
+  }
+
+  const unreadByFriend = new Map(
+    unreadRows.map((row) => [row.senderId, Number(row.unreadCount)])
+  );
+
+  const conversations = friends.map((friend) => ({
+    friend,
+    lastMessage: latestMessageByFriend.get(friend.id) ?? null,
+    unreadCount: unreadByFriend.get(friend.id) ?? 0,
+  }));
+
+  conversations.sort((a, b) => {
+    const aTime = a.lastMessage
+      ? new Date(a.lastMessage.createdAt).getTime()
+      : 0;
+    const bTime = b.lastMessage
+      ? new Date(b.lastMessage.createdAt).getTime()
+      : 0;
+
+    return bTime - aTime || a.friend.name.localeCompare(b.friend.name);
+  });
+
+  return c.json({ conversations });
+});
+
+app.post("/v1/conversations/:friendId/read", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const parsedFriendId = friendIdSchema.safeParse(c.req.param("friendId"));
+
+  if (!parsedFriendId.success) {
+    return c.json({ error: "Invalid friend id" }, 400);
+  }
+
+  const friendId = parsedFriendId.data;
+
+  if (friendId === me) {
+    return c.json(
+      { error: "You cannot mark a conversation with yourself as read" },
+      400
+    );
+  }
+
+  if (!(await areFriends(me, friendId))) {
+    return c.json(
+      { error: "You can only update conversations with friends" },
+      403
+    );
+  }
+
+  const updatedRows = await db
+    .update(messages)
+    .set({ readAt: new Date() })
+    .where(
+      and(
+        eq(messages.senderId, friendId),
+        eq(messages.receiverId, me),
+        isNull(messages.readAt)
+      )
+    )
+    .returning({ id: messages.id });
+
+  return c.json({
+    message: "Conversation marked as read",
+    updatedCount: updatedRows.length,
+  });
 });
 
 // ---------- Messages ----------

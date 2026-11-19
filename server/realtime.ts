@@ -5,10 +5,8 @@ import { Server } from "socket.io";
 import { getAllowedOrigins } from "./cors.js";
 import { setupPrivateChat } from "./socket.js";
 
-// One Redis connection publishes, the other subscribes. The adapter forwards
-// events between Vercel Function instances, not just within one instance.
 function attachRedisAdapter(io: Server) {
-  // Upstash's Vercel integration exposes the Redis-protocol URL as KV_URL.
+
   const redisUrl = process.env.REDIS_URL ?? process.env.KV_URL;
 
   if (!redisUrl) {
@@ -26,27 +24,28 @@ function attachRedisAdapter(io: Server) {
     console.error("Redis subscribe client error:", error);
   });
 
+  if (!pubClient && !subClient) {
+    console.error("Redis clients are not initialized. Socket.IO Redis adapter will not be enabled.");
+    return;
+  }
+
   io.adapter(createAdapter(pubClient, subClient));
   console.log("Socket.IO Redis adapter enabled");
 }
 
 export function createRealtime(httpServer: HTTPServer) {
   const io = new Server(httpServer, {
-    // The Socket.IO transport path is the Vercel function route in production.
-    // The namespace (/private) remains separate.
+   
     path: process.env.VERCEL
       ? "/api/socket-io"
       : "/socket.io",
-    // Vercel WebSocket Functions cannot use Socket.IO's HTTP long-polling
-    // handshake because every request may land on a different instance.
+
     transports: ["websocket"],
     cors: {
       origin: getAllowedOrigins(),
       credentials: true,
     },
-    // WebSocket upgrades are not covered by browser CORS. Reject a
-    // handshake from an unknown browser origin, while still allowing
-    // non-browser clients that send no Origin header.
+
     allowRequest: (request, callback) => {
       const origin = request.headers.origin;
       const allowedOrigins = getAllowedOrigins();
@@ -60,7 +59,7 @@ export function createRealtime(httpServer: HTTPServer) {
     },
   });
 
-  // The namespace (/private) and the transport path (/socket.io) are separate.
+
   const privateNamespace = io.of("/private");
 
   attachRedisAdapter(io);

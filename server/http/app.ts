@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "./db.js";
+import { db } from "../db/client.js";
 import {
   friendRequests,
   groupMembers,
@@ -11,10 +11,17 @@ import {
   groups,
   messages,
   users,
-} from "./schema.js";
-import { areFriends } from "./friendship.js";
-import { publishGroupEvent } from "./group-events.js";
-import { getAllowedOrigins } from "./cors.js";
+} from "../db/schema.js";
+import { areFriends } from "../modules/friends/service.js";
+import { updateFriendRequestStatus } from "../modules/friends/requests.js";
+import {
+  getAcceptedFriendIds,
+  getGroupMembership,
+  isGroupAdmin,
+} from "../modules/groups/service.js";
+import { getUsersByIds, type PublicUser } from "../modules/users/service.js";
+import { publishGroupEvent } from "../realtime/group-events.js";
+import { getAllowedOrigins } from "../config/cors.js";
 import {
   authMiddleware,
   COOKIE_NAME,
@@ -23,7 +30,7 @@ import {
   hashPassword,
   verifyPassword,
   type AuthVariables,
-} from "./auth.js";
+} from "../middleware/auth.js";
 
 export const app = new Hono<{ Variables: AuthVariables }>();
 
@@ -52,21 +59,15 @@ const loginSchema = z.object({
 });
 
 const profileSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(2, "Name must be at least 2 characters")
-    .max(100, "Name must be at most 100 characters"),
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
 });
 
 const sendFriendRequestSchema = z.object({
-  receiverId: z.string().uuid("Invalid user id"),
+  receiverId: z.string().uuid("Invalid receiver id"),
 });
 
 const friendRequestIdSchema = z.string().uuid("Invalid friend request id");
-
 const friendIdSchema = z.string().uuid("Invalid friend id");
-
 const groupIdSchema = z.string().uuid("Invalid group id");
 
 const createGroupSchema = z.object({
@@ -83,112 +84,18 @@ const updateGroupSchema = z
     name: z.string().trim().min(2).max(100).optional(),
     onlyAdminsCanSend: z.boolean().optional(),
   })
-  .refine((value) => value.name !== undefined || value.onlyAdminsCanSend !== undefined);
+  .refine(
+    (value) =>
+      value.name !== undefined || value.onlyAdminsCanSend !== undefined
+  );
 
 const updateGroupMemberSchema = z.object({
   role: z.enum(["admin", "member"]),
 });
 
-type PublicUser = {
-  id: string;
-  name: string;
-  email: string;
-};
-
 type PublicGroupMember = PublicUser & {
   role: "owner" | "admin" | "member";
 };
-
-async function getUsersByIds(userIds: string[]): Promise<Map<string, PublicUser>> {
-  if (userIds.length === 0) {
-    return new Map<string, PublicUser>();
-  }
-
-  const userRows = await db
-    .select({
-      id: users.id,
-      name: users.name,
-      email: users.email,
-    })
-    .from(users)
-    .where(inArray(users.id, userIds));
-
-  return new Map(userRows.map((user) => [user.id, user]));
-}
-
-async function updateFriendRequestStatus(
-  requestId: string,
-  userId: string,
-  newStatus: "accepted" | "declined"
-) {
-  const request = await db.query.friendRequests.findFirst({
-    where: eq(friendRequests.id, requestId),
-  });
-
-  if (!request) {
-    return { error: "Friend request not found", status: 404 as const };
-  }
-
-  if (request.receiverId !== userId) {
-    return {
-      error: "Only the receiver can respond to this request",
-      status: 403 as const,
-    };
-  }
-
-  if (request.status !== "pending") {
-    return {
-      error: "This friend request is no longer pending",
-      status: 409 as const,
-    };
-  }
-
-  const [updatedRequest] = await db
-    .update(friendRequests)
-    .set({ status: newStatus })
-    .where(eq(friendRequests.id, requestId))
-    .returning();
-
-  return { request: updatedRequest };
-}
-
-async function getAcceptedFriendIds(userId: string) {
-  const acceptedRows = await db
-    .select()
-    .from(friendRequests)
-    .where(
-      and(
-        eq(friendRequests.status, "accepted"),
-        or(
-          eq(friendRequests.senderId, userId),
-          eq(friendRequests.receiverId, userId)
-        )
-      )
-    );
-
-  return [
-    ...new Set(
-      acceptedRows.map((row) =>
-        row.senderId === userId ? row.receiverId : row.senderId
-      )
-    ),
-  ];
-}
-
-async function getGroupMembership(groupId: string, userId: string) {
-  const [membership] = await db
-    .select({ id: groupMembers.id, role: groupMembers.role })
-    .from(groupMembers)
-    .where(
-      and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId))
-    )
-    .limit(1);
-  return membership;
-}
-
-function isGroupAdmin(role: string) {
-  return role === "owner" || role === "admin";
-}
 
 app.get("/", (c) => {
   return c.json({ message: "Chat API is running" });

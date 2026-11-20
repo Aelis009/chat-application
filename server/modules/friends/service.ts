@@ -1,6 +1,6 @@
 import { and, eq, or } from "drizzle-orm";
-import { db } from "./db.js";
-import { friendRequests } from "./schema.js";
+import { db } from "../../db/client.js";
+import { friendRequests } from "../../db/schema.js";
 
 // An accepted friend request is the friendship. This checks both directions
 // because either user could have been the sender.

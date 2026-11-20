@@ -10,7 +10,7 @@
     "dev:legacy": "nodemon server.js",
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
-    "db:seed": "tsx seed.ts"
+    "db:seed": "tsx scripts/seed.ts"
   },
   "keywords": [],
   "type": "module",

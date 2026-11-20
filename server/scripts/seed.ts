@@ -1,8 +1,8 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
-import { db } from "./db.js";
-import { users } from "./schema.js";
+import { db } from "../db/client.js";
+import { users } from "../db/schema.js";
 
 const MOCK_PASSWORD = "password123";
 

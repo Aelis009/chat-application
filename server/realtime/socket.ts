@@ -1,10 +1,10 @@
 import type { Namespace } from "socket.io";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
-import { COOKIE_NAME, getCookieValue, verifyToken } from "./auth.js";
-import { db } from "./db.js";
-import { areFriends } from "./friendship.js";
-import { groupMembers, groupMessages, groups, messages } from "./schema.js";
+import { COOKIE_NAME, getCookieValue, verifyToken } from "../middleware/auth.js";
+import { db } from "../db/client.js";
+import { areFriends } from "../modules/friends/service.js";
+import { groupMembers, groupMessages, groups, messages } from "../db/schema.js";
 import { subscribeToGroupEvents } from "./group-events.js";
 
 const sendMessageSchema = z.object({

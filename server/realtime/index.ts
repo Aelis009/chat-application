@@ -2,7 +2,7 @@ import type { Server as HTTPServer } from "node:http";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { Redis } from "ioredis";
 import { Server } from "socket.io";
-import { getAllowedOrigins } from "./cors.js";
+import { getAllowedOrigins } from "../config/cors.js";
 import { setupPrivateChat } from "./socket.js";
 
 function attachRedisAdapter(io: Server) {

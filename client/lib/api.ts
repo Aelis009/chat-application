@@ -45,6 +45,8 @@ export type Message = {
   senderId: string;
   receiverId: string;
   content: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
   readAt?: string | null;
   createdAt: string;
 };
@@ -90,6 +92,8 @@ export type GroupMessage = {
   groupId: string;
   senderId: string;
   content: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
   createdAt: string;
 };
 
@@ -112,6 +116,20 @@ export type GroupsResponse = {
 
 export type GroupMessagesResponse = {
   messages: GroupMessage[];
+};
+
+export type Notification = {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  data: Record<string, string> | null;
+  readAt: string | null;
+  createdAt: string;
+};
+
+export type NotificationsResponse = {
+  notifications: Notification[];
 };
 
 export class ApiError extends Error {

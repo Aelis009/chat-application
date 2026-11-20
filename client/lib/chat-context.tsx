@@ -27,6 +27,8 @@ import {
   type MeResponse,
   type Message,
   type MessagesResponse,
+  type Notification,
+  type NotificationsResponse,
   type ProfileResponse,
   type User,
   type UsersResponse,
@@ -37,6 +39,16 @@ type ListsData = {
   requests: FriendRequestsResponse;
   conversations: Conversation[];
   groups: Group[];
+};
+
+type MessagePageResponse = MessagesResponse & {
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+type GroupMessagePageResponse = GroupMessagesResponse & {
+  nextCursor: string | null;
+  hasMore: boolean;
 };
 
 type GroupEventPayload =
@@ -60,6 +72,7 @@ type ChatContextValue = {
   users: User[];
   conversations: Conversation[];
   groups: Group[];
+  notifications: Notification[];
   requests: FriendRequestsResponse;
   onlineUserIds: string[];
   socketConnected: boolean;
@@ -67,6 +80,8 @@ type ChatContextValue = {
   selectedGroup: Group | null;
   messagesByFriend: Record<string, Message[]>;
   messagesByGroup: Record<string, GroupMessage[]>;
+  hasMoreMessagesByFriend: Record<string, boolean>;
+  hasMoreMessagesByGroup: Record<string, boolean>;
   draft: string;
   groupDraft: string;
   loading: boolean;
@@ -85,6 +100,12 @@ type ChatContextValue = {
   openGroup: (group: Group) => void;
   sendMessage: (event: FormEvent<HTMLFormElement>) => void;
   sendGroupMessage: (event: FormEvent<HTMLFormElement>) => void;
+  editMessage: (messageId: string, content: string, group: boolean) => void;
+  deleteMessage: (messageId: string, group: boolean) => void;
+  loadOlderMessages: (
+    type: "friend" | "group",
+    conversationId: string
+  ) => Promise<boolean>;
   createGroup: (name: string, memberIds: string[]) => Promise<boolean>;
   updateGroup: (
     groupId: string,
@@ -101,6 +122,9 @@ type ChatContextValue = {
   declineRequest: (requestId: string) => Promise<void>;
   cancelRequest: (requestId: string) => Promise<void>;
   removeFriend: (friendId: string) => Promise<void>;
+  markNotificationRead: (notificationId: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
+  dismissNotification: (notificationId: string) => Promise<void>;
   saveProfile: (name: string) => Promise<User>;
   logout: () => Promise<void>;
 };
@@ -133,6 +157,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [users, setUsers] = useState<User[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [requests, setRequests] = useState<FriendRequestsResponse>({
     incoming: [],
     outgoing: [],
@@ -148,6 +173,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [messagesByGroup, setMessagesByGroup] = useState<
     Record<string, GroupMessage[]>
   >({});
+  const [hasMoreMessagesByFriend, setHasMoreMessagesByFriend] = useState<
+    Record<string, boolean>
+  >({});
+  const [hasMoreMessagesByGroup, setHasMoreMessagesByGroup] = useState<
+    Record<string, boolean>
+  >({});
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [draft, setDraft] = useState("");
   const [groupDraft, setGroupDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -214,6 +246,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     try {
       applyLists(await fetchLists());
+      const notificationResponse = await apiFetch<NotificationsResponse>(
+        "/v1/notifications"
+      );
+      setNotifications(notificationResponse.notifications);
     } catch (refreshError) {
       handlePageError(refreshError);
     } finally {
@@ -231,6 +267,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setMe(meResponse.user);
 
         applyLists(await fetchLists());
+        const notificationResponse = await apiFetch<NotificationsResponse>(
+          "/v1/notifications"
+        );
+        if (cancelled) return;
+        setNotifications(notificationResponse.notifications);
       } catch (loadError) {
         if (cancelled) return;
         if (loadError instanceof ApiError && loadError.status === 401) {
@@ -326,6 +367,34 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       });
     }
 
+    function handleMessageUpdated(message: Message) {
+      const otherUserId =
+        message.senderId === currentUserId ? message.receiverId : message.senderId;
+      setMessagesByFriend((previous) => ({
+        ...previous,
+        [otherUserId]: (previous[otherUserId] ?? []).map((item) =>
+          item.id === message.id ? message : item
+        ),
+      }));
+    }
+
+    function handleGroupMessageUpdated(message: GroupMessage) {
+      setMessagesByGroup((previous) => ({
+        ...previous,
+        [message.groupId]: (previous[message.groupId] ?? []).map((item) =>
+          item.id === message.id ? message : item
+        ),
+      }));
+    }
+
+    function handleNotificationCreated(notification: Notification) {
+      setNotifications((previous) => [
+        notification,
+        ...previous.filter((item) => item.id !== notification.id),
+      ]);
+      showTemporaryNotice(notification.title);
+    }
+
     function handleGroupEvent(payload: GroupEventPayload) {
       void refresh().then(() => {
         if (
@@ -378,6 +447,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     socket.on("online_users", setOnlineUserIds);
     socket.on("receive_message", handleReceiveMessage);
     socket.on("receive_group_message", handleReceiveGroupMessage);
+    socket.on("message_updated", handleMessageUpdated);
+    socket.on("group_message_updated", handleGroupMessageUpdated);
+    socket.on("notification_created", handleNotificationCreated);
     socket.on("group_updated", handleGroupEvent);
     socket.on("group_member_role_updated", handleGroupEvent);
     socket.on("group_member_removed", handleGroupEvent);
@@ -396,16 +468,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (!selectedFriend) return;
     let cancelled = false;
 
-    apiFetch<MessagesResponse>(`/v1/messages/${selectedFriend.id}`)
+    apiFetch<MessagePageResponse>(`/v1/messages/${selectedFriend.id}`)
       .then((response) => {
         if (cancelled) return;
         setMessagesByFriend((previous) => {
-          const merged = [...response.messages];
-          for (const message of previous[selectedFriend.id] ?? []) {
-            if (!merged.some((item) => item.id === message.id)) {
-              merged.push(message);
-            }
-          }
+          const existing = previous[selectedFriend.id] ?? [];
+          const merged = [...response.messages, ...existing].filter(
+            (message, index, all) =>
+              all.findIndex((item) => item.id === message.id) === index
+          );
           merged.sort(
             (a, b) =>
               new Date(a.createdAt).getTime() -
@@ -413,6 +484,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           );
           return { ...previous, [selectedFriend.id]: merged };
         });
+        setHasMoreMessagesByFriend((previous) => ({
+          ...previous,
+          [selectedFriend.id]: response.hasMore || response.messages.length === 50,
+        }));
       })
       .catch(handlePageError)
       .finally(() => {
@@ -428,14 +503,28 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     if (!selectedGroup) return;
     let cancelled = false;
 
-    apiFetch<GroupMessagesResponse>(
+    apiFetch<GroupMessagePageResponse>(
       `/v1/groups/${selectedGroup.groupId}/messages`
     )
       .then((response) => {
         if (cancelled) return;
         setMessagesByGroup((previous) => ({
           ...previous,
-          [selectedGroup.groupId]: response.messages,
+          [selectedGroup.groupId]: [
+            ...response.messages,
+            ...(previous[selectedGroup.groupId] ?? []).filter(
+              (message) =>
+                !response.messages.some((item) => item.id === message.id)
+            ),
+          ].sort(
+            (a, b) =>
+              new Date(a.createdAt).getTime() -
+              new Date(b.createdAt).getTime()
+          ),
+        }));
+        setHasMoreMessagesByGroup((previous) => ({
+          ...previous,
+          [selectedGroup.groupId]: response.hasMore || response.messages.length === 50,
         }));
       })
       .catch(handlePageError)
@@ -447,6 +536,66 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [handlePageError, historyVersion, selectedGroup]);
+
+  async function loadOlderMessages(
+    type: "friend" | "group",
+    conversationId: string
+  ) {
+    const currentMessages =
+      type === "friend"
+        ? messagesByFriend[conversationId] ?? []
+        : messagesByGroup[conversationId] ?? [];
+    const cursor = currentMessages[0]?.createdAt;
+    const hasMore =
+      type === "friend"
+        ? hasMoreMessagesByFriend[conversationId]
+        : hasMoreMessagesByGroup[conversationId];
+
+    if (!cursor || !hasMore || loadingOlderMessages) return false;
+
+    setLoadingOlderMessages(true);
+    try {
+      const query = `?before=${encodeURIComponent(cursor)}`;
+      if (type === "friend") {
+        const response = await apiFetch<MessagePageResponse>(
+          `/v1/messages/${conversationId}${query}`
+        );
+        setMessagesByFriend((previous) => ({
+          ...previous,
+          [conversationId]: [
+            ...response.messages,
+            ...(previous[conversationId] ?? []),
+          ],
+        }));
+        setHasMoreMessagesByFriend((previous) => ({
+          ...previous,
+          [conversationId]: response.hasMore,
+        }));
+        return response.messages.length > 0;
+      }
+
+      const response = await apiFetch<GroupMessagePageResponse>(
+        `/v1/groups/${conversationId}/messages${query}`
+      );
+      setMessagesByGroup((previous) => ({
+        ...previous,
+        [conversationId]: [
+          ...response.messages,
+          ...(previous[conversationId] ?? []),
+        ],
+      }));
+      setHasMoreMessagesByGroup((previous) => ({
+        ...previous,
+        [conversationId]: response.hasMore,
+      }));
+      return response.messages.length > 0;
+    } catch (loadError) {
+      handlePageError(loadError);
+      return false;
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }
 
   function openConversation(friend: User) {
     setChatError(null);
@@ -505,11 +654,62 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setChatError("Not connected. Please wait a moment and try again.");
       return;
     }
+
     socketRef.current.emit("send_group_message", {
       groupId: selectedGroup.groupId,
       content,
     });
     setGroupDraft("");
+  }
+
+  async function markNotificationRead(notificationId: string) {
+    await apiFetch<{ message: string }>(
+      `/v1/notifications/${notificationId}/read`,
+      { method: "POST" }
+    );
+    setNotifications((previous) =>
+      previous.map((notification) =>
+        notification.id === notificationId
+          ? { ...notification, readAt: new Date().toISOString() }
+          : notification
+      )
+    );
+  }
+
+  async function markAllNotificationsRead() {
+    await apiFetch<{ message: string }>("/v1/notifications/read-all", {
+      method: "POST",
+    });
+    const readAt = new Date().toISOString();
+    setNotifications((previous) =>
+      previous.map((notification) => ({ ...notification, readAt }))
+    );
+  }
+
+  async function dismissNotification(notificationId: string) {
+    await apiFetch<{ message: string }>(
+      `/v1/notifications/${notificationId}`,
+      { method: "DELETE" }
+    );
+    setNotifications((previous) =>
+      previous.filter((notification) => notification.id !== notificationId)
+    );
+  }
+
+  function editMessage(messageId: string, content: string, group: boolean) {
+    const trimmed = content.trim();
+    if (!trimmed || !socketRef.current?.connected) return;
+    socketRef.current.emit(group ? "edit_group_message" : "edit_message", {
+      messageId,
+      content: trimmed,
+    });
+  }
+
+  function deleteMessage(messageId: string, group: boolean) {
+    if (!socketRef.current?.connected) return;
+    socketRef.current.emit(group ? "delete_group_message" : "delete_message", {
+      messageId,
+    });
   }
 
   async function createGroup(name: string, memberIds: string[]) {
@@ -723,6 +923,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         users,
         conversations,
         groups,
+        notifications,
         requests,
         onlineUserIds,
         socketConnected,
@@ -730,6 +931,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         selectedGroup,
         messagesByFriend,
         messagesByGroup,
+        hasMoreMessagesByFriend,
+        hasMoreMessagesByGroup,
         draft,
         groupDraft,
         loading,
@@ -748,6 +951,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         openGroup,
         sendMessage,
         sendGroupMessage,
+        editMessage,
+        deleteMessage,
+        loadOlderMessages,
         createGroup,
         updateGroup,
         updateGroupMemberRole,
@@ -757,6 +963,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         declineRequest,
         cancelRequest,
         removeFriend,
+        markNotificationRead,
+        markAllNotificationsRead,
+        dismissNotification,
         saveProfile,
         logout,
       }}

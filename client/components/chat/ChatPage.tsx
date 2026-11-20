@@ -5,6 +5,8 @@ import { useChat } from "@/lib/chat-context";
 import type { Conversation, Group, Message } from "@/lib/api";
 import UserAvatar from "@/components/chat/UserAvatar";
 
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
 function formatMessageTime(value: string) {
   const date = new Date(value);
   const today = new Date();
@@ -14,6 +16,10 @@ function formatMessageTime(value: string) {
   });
   if (date.toDateString() === today.toDateString()) return time;
   return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
+}
+
+function canEditMessage(createdAt: string) {
+  return Date.now() - new Date(createdAt).getTime() <= MESSAGE_EDIT_WINDOW_MS;
 }
 
 function sortConversations(conversations: Conversation[]) {
@@ -32,19 +38,30 @@ export default function ChatPage() {
   const {
     me, users, conversations, groups, onlineUserIds, socketConnected, selectedFriend,
     selectedGroup, messagesByFriend, messagesByGroup, draft, groupDraft,
+    hasMoreMessagesByFriend, hasMoreMessagesByGroup, loadOlderMessages,
     loadingHistory, chatError, refreshing, actionId,
     error, mobileChatOpen, setMobileChatOpen, refresh, openConversation,
     openGroup, setDraft, setGroupDraft, sendMessage, sendGroupMessage,
+    editMessage, deleteMessage,
     createGroup, updateGroup, updateGroupMemberRole, removeGroupMember,
     removeFriend,
   } = useChat();
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadingOlderRef = useRef(false);
+  const nearBottomRef = useRef(true);
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
   const [groupName, setGroupName] = useState("");
   const [memberSearch, setMemberSearch] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [isGroupProfileOpen, setIsGroupProfileOpen] = useState(false);
   const [groupNameEdit, setGroupNameEdit] = useState("");
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
+  const [openMessageMenuId, setOpenMessageMenuId] = useState<string | null>(null);
+  const [, setCurrentTime] = useState(() => Date.now());
+  const [showNewMessages, setShowNewMessages] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const onlineSet = new Set(onlineUserIds);
   const sortedConversations = sortConversations(conversations);
   const sortedGroups = sortGroups(groups);
@@ -75,6 +92,47 @@ export default function ChatPage() {
     !selectedGroup.onlyAdminsCanSend ||
     canManageGroup;
 
+  const activeConversationId = selectedFriend?.id ?? selectedGroup?.groupId ?? null;
+  const activeConversationType: "friend" | "group" = selectedFriend
+    ? "friend"
+    : "group";
+  const hasMoreOlder = activeConversationId
+    ? activeConversationType === "friend"
+      ? hasMoreMessagesByFriend[activeConversationId]
+      : hasMoreMessagesByGroup[activeConversationId]
+    : false;
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!openMessageMenuId) return;
+
+    function closeMenuOnOutsidePointer(event: PointerEvent) {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !target.closest("[data-message-menu]")
+      ) {
+        setOpenMessageMenuId(null);
+      }
+    }
+
+    document.addEventListener(
+      "pointerdown",
+      closeMenuOnOutsidePointer,
+      true
+    );
+    return () =>
+      document.removeEventListener(
+        "pointerdown",
+        closeMenuOnOutsidePointer,
+        true
+      );
+  }, [openMessageMenuId]);
+
   function closeCreateGroup() {
     setIsCreateGroupOpen(false);
     setGroupName("");
@@ -86,6 +144,18 @@ export default function ChatPage() {
     if (!selectedGroup) return;
     setGroupNameEdit(selectedGroup.name);
     setIsGroupProfileOpen(true);
+  }
+
+  function startEditing(id: string, content: string) {
+    setEditingMessageId(id);
+    setEditingContent(content);
+  }
+
+  function saveEditing(group: boolean) {
+    if (!editingMessageId || !editingContent.trim()) return;
+    editMessage(editingMessageId, editingContent, group);
+    setEditingMessageId(null);
+    setEditingContent("");
   }
 
   async function saveGroupName(event: FormEvent<HTMLFormElement>) {
@@ -105,8 +175,81 @@ export default function ChatPage() {
   }
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [selectedFriend, selectedMessages.length, mobileChatOpen]);
+    const body = chatBodyRef.current;
+    if (!body) return;
+    nearBottomRef.current = true;
+    setShowNewMessages(false);
+    requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight;
+    });
+  }, [selectedFriend?.id, selectedGroup?.groupId, mobileChatOpen]);
+
+  useEffect(() => {
+    const body = chatBodyRef.current;
+    if (!body || loadingOlderRef.current) return;
+    if (nearBottomRef.current) {
+      body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
+    } else {
+      setShowNewMessages(true);
+    }
+  }, [selectedMessages.length, selectedGroupMessages.length]);
+
+  function clearLongPressTimer() {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
+  function startLongPress(messageId: string, pointerType: string) {
+    clearLongPressTimer();
+    if (pointerType !== "touch") return;
+    longPressTimerRef.current = setTimeout(() => {
+      setOpenMessageMenuId(messageId);
+      longPressTimerRef.current = null;
+    }, 500);
+  }
+
+  function handleChatScroll() {
+    const body = chatBodyRef.current;
+    if (!body) return;
+    nearBottomRef.current =
+      body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+    if (nearBottomRef.current) setShowNewMessages(false);
+
+    if (
+      body.scrollTop > 120 ||
+      !activeConversationId ||
+      !hasMoreOlder ||
+      loadingOlderRef.current
+    ) {
+      return;
+    }
+
+    loadingOlderRef.current = true;
+    setIsLoadingOlder(true);
+    const previousHeight = body.scrollHeight;
+    const previousTop = body.scrollTop;
+    void loadOlderMessages(activeConversationType, activeConversationId)
+      .then(() => {
+        requestAnimationFrame(() => {
+          const currentBody = chatBodyRef.current;
+          if (currentBody) {
+            currentBody.scrollTop =
+              previousTop + currentBody.scrollHeight - previousHeight;
+          }
+          loadingOlderRef.current = false;
+          setIsLoadingOlder(false);
+        });
+      });
+  }
+
+  function handleMessagePointerDown(
+    messageId: string,
+    pointerType: string
+  ) {
+    startLongPress(messageId, pointerType);
+  }
 
   return (
     <>
@@ -245,28 +388,145 @@ export default function ChatPage() {
               </div>
             </header>
 
-            <div className="chat-body">
+            <div
+              className="chat-body"
+              ref={chatBodyRef}
+              onScroll={handleChatScroll}
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  setOpenMessageMenuId(null);
+                }
+              }}
+            >
+              {showNewMessages ? (
+                <button
+                  className="new-messages-button"
+                  type="button"
+                  onClick={() => {
+                    nearBottomRef.current = true;
+                    setShowNewMessages(false);
+                    chatBodyRef.current?.scrollTo({
+                      top: chatBodyRef.current.scrollHeight,
+                      behavior: "smooth",
+                    });
+                  }}
+                >
+                  New messages
+                </button>
+              ) : null}
               <div className="messages">
                 {loadingHistory && (selectedMessages.length + selectedGroupMessages.length) === 0 ? <p className="empty-note chat-loading-note"><span className="loading-spinner" aria-hidden="true" />Loading messages...</p> : null}
+                {isLoadingOlder ? <p className="empty-note chat-loading-note"><span className="loading-spinner" aria-hidden="true" />Loading older messages...</p> : null}
                 {!loadingHistory && selectedMessages.length === 0 && selectedGroupMessages.length === 0 ? <p className="empty-note chat-loading-note">Start the conversation.</p> : null}
                 {selectedFriend && selectedMessages.map((message: Message) => (
-                  <div key={message.id} className={`message-row${message.senderId === me?.id ? " is-mine" : ""}`}>
+                  <div
+                    key={message.id}
+                    className={`message-row${message.senderId === me?.id ? " is-mine" : ""}`}
+                    onPointerDown={(event) => handleMessagePointerDown(message.id, event.pointerType)}
+                    onPointerUp={clearLongPressTimer}
+                    onPointerCancel={clearLongPressTimer}
+                    onContextMenu={(event) => {
+                      if (openMessageMenuId === message.id) event.preventDefault();
+                    }}
+                  >
                     <div className="message-bubble">
-                      {message.content}
+                      {message.deletedAt ? (
+                        <em>Message deleted</em>
+                      ) : editingMessageId === message.id ? (
+                        <div className="message-edit-form">
+                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={2000} />
+                          <button className="button button-primary button-small" type="button" onClick={() => saveEditing(false)}>Save</button>
+                          <button className="button button-ghost button-small" type="button" onClick={() => setEditingMessageId(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        <>
+                          {message.content}
+                          {message.editedAt ? <small className="message-edited">edited</small> : null}
+                          {message.senderId === me?.id ? (
+                            <span
+                              className={`message-actions${openMessageMenuId === message.id ? " is-open" : ""}`}
+                              data-message-menu
+                            >
+                              <button
+                                className="message-menu-trigger"
+                                type="button"
+                                aria-label="Message actions"
+                                aria-expanded={openMessageMenuId === message.id}
+                                onClick={() => setOpenMessageMenuId((current) => current === message.id ? null : message.id)}
+                              >
+                                ⋮
+                              </button>
+                              {openMessageMenuId === message.id ? (
+                                <span className="message-action-menu">
+                                  {canEditMessage(message.createdAt) ? (
+                                    <button type="button" onClick={() => { startEditing(message.id, message.content); setOpenMessageMenuId(null); }}>Edit</button>
+                                  ) : null}
+                                  <button type="button" onClick={() => { deleteMessage(message.id, false); setOpenMessageMenuId(null); }}>Delete</button>
+                                </span>
+                              ) : null}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
                       <span className="message-time">{formatMessageTime(message.createdAt)}</span>
                     </div>
                   </div>
                 ))}
                 {selectedGroup && selectedGroupMessages.map((message) => (
-                  <div key={message.id} className={`message-row${message.senderId === me?.id ? " is-mine" : ""}`}>
+                  <div
+                    key={message.id}
+                    className={`message-row${message.senderId === me?.id ? " is-mine" : ""}`}
+                    onPointerDown={(event) => handleMessagePointerDown(message.id, event.pointerType)}
+                    onPointerUp={clearLongPressTimer}
+                    onPointerCancel={clearLongPressTimer}
+                    onContextMenu={(event) => {
+                      if (openMessageMenuId === message.id) event.preventDefault();
+                    }}
+                  >
                     <div className="message-bubble">
                       {message.senderId !== me?.id ? <strong>{selectedGroup.members.find((member) => member.id === message.senderId)?.name ?? "Member"}: </strong> : null}
-                      {message.content}
+                      {message.deletedAt ? (
+                        <em>Message deleted</em>
+                      ) : editingMessageId === message.id ? (
+                        <div className="message-edit-form">
+                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={2000} />
+                          <button className="button button-primary button-small" type="button" onClick={() => saveEditing(true)}>Save</button>
+                          <button className="button button-ghost button-small" type="button" onClick={() => setEditingMessageId(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        <>
+                          {message.content}
+                          {message.editedAt ? <small className="message-edited">edited</small> : null}
+                          {message.senderId === me?.id || canManageGroup ? (
+                            <span
+                              className={`message-actions${openMessageMenuId === message.id ? " is-open" : ""}`}
+                              data-message-menu
+                            >
+                              <button
+                                className="message-menu-trigger"
+                                type="button"
+                                aria-label="Message actions"
+                                aria-expanded={openMessageMenuId === message.id}
+                                onClick={() => setOpenMessageMenuId((current) => current === message.id ? null : message.id)}
+                              >
+                                ⋮
+                              </button>
+                              {openMessageMenuId === message.id ? (
+                                <span className="message-action-menu">
+                                  {message.senderId === me?.id && canEditMessage(message.createdAt) ? (
+                                    <button type="button" onClick={() => { startEditing(message.id, message.content); setOpenMessageMenuId(null); }}>Edit</button>
+                                  ) : null}
+                                  <button type="button" onClick={() => { deleteMessage(message.id, true); setOpenMessageMenuId(null); }}>Delete</button>
+                                </span>
+                              ) : null}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
                       <span className="message-time">{formatMessageTime(message.createdAt)}</span>
                     </div>
                   </div>
                 ))}
-                <div ref={messagesEndRef} />
               </div>
             </div>
 

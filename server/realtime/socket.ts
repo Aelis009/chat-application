@@ -1,6 +1,6 @@
 import type { Namespace } from "socket.io";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import { COOKIE_NAME, getCookieValue, verifyToken } from "../middleware/auth.js";
 import { db } from "../db/client.js";
 import { areFriends } from "../modules/friends/service.js";
@@ -21,6 +21,13 @@ const sendGroupMessageSchema = z.object({
   content: z.string().trim().min(1, "Message cannot be empty").max(2000),
 });
 
+const messageMutationSchema = z.object({
+  messageId: z.string().uuid(),
+  content: z.string().trim().min(1).max(2000).optional(),
+});
+
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+
 type PrivateSocketData = {
   userId: string;
 };
@@ -31,6 +38,10 @@ function userRoom(userId: string) {
 
 export function setupPrivateChat(io: Namespace) {
   subscribeToGroupEvents((event) => {
+    if (event.type === "notification_created") {
+      io.to(`user:${event.userId}`).emit(event.type, event.notification);
+      return;
+    }
     io.to(`group:${event.groupId}`).emit(event.type, event);
   });
 
@@ -210,6 +221,118 @@ export function setupPrivateChat(io: Namespace) {
           message: "Group message could not be sent",
         });
       }
+    });
+
+    socket.on("edit_message", async (payload) => {
+      const result = messageMutationSchema.safeParse(payload);
+      if (!result.success || !result.data.content) {
+        socket.emit("chat_error", { message: "Invalid message update" });
+        return;
+      }
+      const [updatedMessage] = await db
+        .update(messages)
+        .set({ content: result.data.content, editedAt: new Date() })
+        .where(
+          and(
+            eq(messages.id, result.data.messageId),
+            eq(messages.senderId, userId),
+            gte(
+              messages.createdAt,
+              new Date(Date.now() - MESSAGE_EDIT_WINDOW_MS)
+            )
+          )
+        )
+        .returning();
+      if (!updatedMessage) {
+        socket.emit("chat_error", { message: "Message not found or cannot be edited" });
+        return;
+      }
+      io.to(userRoom(updatedMessage.senderId))
+        .to(userRoom(updatedMessage.receiverId))
+        .emit("message_updated", updatedMessage);
+    });
+
+    socket.on("delete_message", async (payload) => {
+      const result = messageMutationSchema.safeParse(payload);
+      if (!result.success) {
+        socket.emit("chat_error", { message: "Invalid message deletion" });
+        return;
+      }
+      const [deletedMessage] = await db
+        .update(messages)
+        .set({ deletedAt: new Date() })
+        .where(and(eq(messages.id, result.data.messageId), eq(messages.senderId, userId)))
+        .returning();
+      if (!deletedMessage) {
+        socket.emit("chat_error", { message: "Message not found or cannot be deleted" });
+        return;
+      }
+      io.to(userRoom(deletedMessage.senderId))
+        .to(userRoom(deletedMessage.receiverId))
+        .emit("message_updated", deletedMessage);
+    });
+
+    socket.on("edit_group_message", async (payload) => {
+      const result = messageMutationSchema.safeParse(payload);
+      if (!result.success || !result.data.content) {
+        socket.emit("chat_error", { message: "Invalid group message update" });
+        return;
+      }
+      const [updatedMessage] = await db
+        .update(groupMessages)
+        .set({ content: result.data.content, editedAt: new Date() })
+        .where(
+          and(
+            eq(groupMessages.id, result.data.messageId),
+            eq(groupMessages.senderId, userId),
+            gte(
+              groupMessages.createdAt,
+              new Date(Date.now() - MESSAGE_EDIT_WINDOW_MS)
+            )
+          )
+        )
+        .returning();
+      if (!updatedMessage) {
+        socket.emit("chat_error", { message: "Group message not found or cannot be edited" });
+        return;
+      }
+      io.to(`group:${updatedMessage.groupId}`).emit("group_message_updated", updatedMessage);
+    });
+
+    socket.on("delete_group_message", async (payload) => {
+      const result = messageMutationSchema.safeParse(payload);
+      if (!result.success) {
+        socket.emit("chat_error", { message: "Invalid group message deletion" });
+        return;
+      }
+      const [messageToDelete] = await db
+        .select()
+        .from(groupMessages)
+        .where(eq(groupMessages.id, result.data.messageId))
+        .limit(1);
+      if (!messageToDelete) {
+        socket.emit("chat_error", { message: "Group message not found" });
+        return;
+      }
+      const [membership] = await db
+        .select({ role: groupMembers.role })
+        .from(groupMembers)
+        .where(and(eq(groupMembers.groupId, messageToDelete.groupId), eq(groupMembers.userId, userId)))
+        .limit(1);
+      if (
+        messageToDelete.senderId !== userId &&
+        membership?.role !== "owner" &&
+        membership?.role !== "admin"
+      ) {
+        socket.emit("chat_error", { message: "You cannot delete this group message" });
+        return;
+      }
+      const [deletedMessage] = await db
+        .update(groupMessages)
+        .set({ deletedAt: new Date() })
+        .where(eq(groupMessages.id, messageToDelete.id))
+        .returning();
+      io.to(`group:${deletedMessage.groupId}`).emit("group_message_updated", deletedMessage);
     });
 
     socket.on("join_group", async (payload) => {

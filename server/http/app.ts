@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { deleteCookie, setCookie } from "hono/cookie";
-import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/client.js";
 import {
@@ -10,6 +10,7 @@ import {
   groupMessages,
   groups,
   messages,
+  notifications,
   users,
 } from "../db/schema.js";
 import { areFriends } from "../modules/friends/service.js";
@@ -20,6 +21,7 @@ import {
   isGroupAdmin,
 } from "../modules/groups/service.js";
 import { getUsersByIds, type PublicUser } from "../modules/users/service.js";
+import { createNotification } from "../modules/notifications/service.js";
 import { publishGroupEvent } from "../realtime/group-events.js";
 import { getAllowedOrigins } from "../config/cors.js";
 import {
@@ -69,6 +71,7 @@ const sendFriendRequestSchema = z.object({
 const friendRequestIdSchema = z.string().uuid("Invalid friend request id");
 const friendIdSchema = z.string().uuid("Invalid friend id");
 const groupIdSchema = z.string().uuid("Invalid group id");
+const notificationIdSchema = z.string().uuid("Invalid notification id");
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -261,6 +264,73 @@ app.patch("/v1/profile", authMiddleware, async (c) => {
   });
 });
 
+app.get("/v1/notifications", authMiddleware, async (c) => {
+  const rows = await db
+    .select()
+    .from(notifications)
+    .where(eq(notifications.userId, c.get("userId")))
+    .orderBy(desc(notifications.createdAt))
+    .limit(100);
+
+  return c.json({
+    notifications: rows.map((notification) => ({
+      ...notification,
+      data: notification.data ? JSON.parse(notification.data) : null,
+    })),
+  });
+});
+
+app.post("/v1/notifications/:id/read", authMiddleware, async (c) => {
+  const parsedId = notificationIdSchema.safeParse(c.req.param("id"));
+  if (!parsedId.success) return c.json({ error: "Invalid notification id" }, 400);
+
+  const [updated] = await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(
+        eq(notifications.id, parsedId.data),
+        eq(notifications.userId, c.get("userId"))
+      )
+    )
+    .returning({ id: notifications.id });
+
+  if (!updated) return c.json({ error: "Notification not found" }, 404);
+  return c.json({ message: "Notification marked as read" });
+});
+
+app.post("/v1/notifications/read-all", authMiddleware, async (c) => {
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(
+        eq(notifications.userId, c.get("userId")),
+        isNull(notifications.readAt)
+      )
+    );
+
+  return c.json({ message: "Notifications marked as read" });
+});
+
+app.delete("/v1/notifications/:id", authMiddleware, async (c) => {
+  const parsedId = notificationIdSchema.safeParse(c.req.param("id"));
+  if (!parsedId.success) return c.json({ error: "Invalid notification id" }, 400);
+
+  const deleted = await db
+    .delete(notifications)
+    .where(
+      and(
+        eq(notifications.id, parsedId.data),
+        eq(notifications.userId, c.get("userId"))
+      )
+    )
+    .returning({ id: notifications.id });
+
+  if (deleted.length === 0) return c.json({ error: "Notification not found" }, 404);
+  return c.json({ message: "Notification dismissed" });
+});
+
 // ---------- Users ----------
 
 app.get("/v1/users", authMiddleware, async (c) => {
@@ -392,6 +462,14 @@ app.post("/v1/friend-requests", authMiddleware, async (c) => {
     })
     .returning();
 
+  await createNotification({
+    userId: receiverId,
+    type: "friend_request",
+    title: "New friend request",
+    body: "You received a new friend request",
+    data: { requestId: request.id, senderId: me },
+  });
+
   return c.json(
     {
       message: "Friend request sent",
@@ -467,6 +545,14 @@ app.post("/v1/friend-requests/:id/accept", authMiddleware, async (c) => {
   if ("error" in result) {
     return c.json({ error: result.error }, result.status);
   }
+
+  await createNotification({
+    userId: result.request.senderId,
+    type: "friend_request_accepted",
+    title: "Friend request accepted",
+    body: "Your friend request was accepted",
+    data: { userId: c.get("userId") },
+  });
 
   return c.json({
     message: "Friend request accepted",
@@ -682,6 +768,23 @@ app.patch("/v1/groups/:groupId", authMiddleware, async (c) => {
     changedBy: c.get("userId"),
     changes: result.data,
   });
+  const groupMemberRows = await db
+    .select({ userId: groupMembers.userId })
+    .from(groupMembers)
+    .where(eq(groupMembers.groupId, parsedGroupId.data));
+  await Promise.all(
+    groupMemberRows
+      .filter(({ userId }) => userId !== c.get("userId"))
+      .map(({ userId }) =>
+        createNotification({
+          userId,
+          type: "group_settings_changed",
+          title: "Group settings changed",
+          body: "A group administrator changed the group settings",
+          data: { groupId: parsedGroupId.data },
+        })
+      )
+  );
 
   return c.json({ message: "Group updated", group: updatedGroup });
 });
@@ -734,6 +837,16 @@ app.patch(
       memberId: parsedMemberId.data,
       role: result.data.role,
     });
+    await createNotification({
+      userId: parsedMemberId.data,
+      type: "group_role_changed",
+      title: result.data.role === "admin" ? "You are a group admin" : "Admin access removed",
+      body:
+        result.data.role === "admin"
+          ? "You can now manage this group"
+          : "Your group admin access was removed",
+      data: { groupId: parsedGroupId.data },
+    });
 
     return c.json({ message: "Member role updated" });
   }
@@ -783,6 +896,13 @@ app.delete(
       groupId: parsedGroupId.data,
       memberId: parsedMemberId.data,
     });
+    await createNotification({
+      userId: parsedMemberId.data,
+      type: "group_removed",
+      title: "Removed from group",
+      body: "You were removed from a group",
+      data: { groupId: parsedGroupId.data },
+    });
 
     return c.json({ message: "Member removed" });
   }
@@ -804,20 +924,41 @@ app.get("/v1/groups/:groupId/messages", authMiddleware, async (c) => {
     return c.json({ error: "You are not a member of this group" }, 403);
   }
 
+  const before = c.req.query("before");
+  const beforeDate = before ? new Date(before) : null;
+  if (beforeDate && Number.isNaN(beforeDate.getTime())) {
+    return c.json({ error: "Invalid message cursor" }, 400);
+  }
+  const limit = 50;
   const messageRows = await db
     .select({
       id: groupMessages.id,
       groupId: groupMessages.groupId,
       senderId: groupMessages.senderId,
       content: groupMessages.content,
+      editedAt: groupMessages.editedAt,
+      deletedAt: groupMessages.deletedAt,
       createdAt: groupMessages.createdAt,
     })
     .from(groupMessages)
-    .where(eq(groupMessages.groupId, parsedGroupId.data))
+    .where(
+      before
+        ? and(
+            eq(groupMessages.groupId, parsedGroupId.data),
+            lt(groupMessages.createdAt, beforeDate!)
+          )
+        : eq(groupMessages.groupId, parsedGroupId.data)
+    )
     .orderBy(desc(groupMessages.createdAt))
-    .limit(100);
+    .limit(limit + 1);
 
-  return c.json({ messages: messageRows.reverse() });
+  const hasMore = messageRows.length > limit;
+  const page = messageRows.slice(0, limit).reverse();
+  return c.json({
+    messages: page,
+    nextCursor: hasMore ? page[0]?.createdAt.toISOString() ?? null : null,
+    hasMore,
+  });
 });
 
 app.delete("/v1/friends/:friendId", authMiddleware, async (c) => {
@@ -886,6 +1027,8 @@ app.get("/v1/conversations", authMiddleware, async (c) => {
         senderId: messages.senderId,
         receiverId: messages.receiverId,
         content: messages.content,
+        editedAt: messages.editedAt,
+        deletedAt: messages.deletedAt,
         readAt: messages.readAt,
         createdAt: messages.createdAt,
       })
@@ -909,6 +1052,8 @@ app.get("/v1/conversations", authMiddleware, async (c) => {
       senderId: string;
       receiverId: string;
       content: string;
+      editedAt: Date | null;
+      deletedAt: Date | null;
       readAt: Date | null;
       createdAt: Date;
     }
@@ -930,6 +1075,8 @@ app.get("/v1/conversations", authMiddleware, async (c) => {
       senderId: row.senderId,
       receiverId: row.receiverId,
       content: row.content,
+      editedAt: row.editedAt,
+      deletedAt: row.deletedAt,
       readAt: row.readAt,
       createdAt: row.createdAt,
     });
@@ -1024,19 +1171,39 @@ app.get("/v1/messages/:friendId", authMiddleware, async (c) => {
     return c.json({ error: "You can only view messages with friends" }, 403);
   }
 
+  const before = c.req.query("before");
+  const beforeDate = before ? new Date(before) : null;
+  if (beforeDate && Number.isNaN(beforeDate.getTime())) {
+    return c.json({ error: "Invalid message cursor" }, 400);
+  }
+  const limit = 50;
   const messageRows = await db
     .select()
     .from(messages)
     .where(
-      or(
-        and(eq(messages.senderId, me), eq(messages.receiverId, friendId)),
-        and(eq(messages.senderId, friendId), eq(messages.receiverId, me))
-      )
+      before
+        ? and(
+            or(
+              and(eq(messages.senderId, me), eq(messages.receiverId, friendId)),
+              and(eq(messages.senderId, friendId), eq(messages.receiverId, me))
+            ),
+            lt(messages.createdAt, beforeDate!)
+          )
+        : or(
+            and(eq(messages.senderId, me), eq(messages.receiverId, friendId)),
+            and(eq(messages.senderId, friendId), eq(messages.receiverId, me))
+          )
     )
     .orderBy(desc(messages.createdAt))
-    .limit(50);
+    .limit(limit + 1);
 
-  return c.json({ messages: messageRows.reverse() });
+  const hasMore = messageRows.length > limit;
+  const page = messageRows.slice(0, limit).reverse();
+  return c.json({
+    messages: page,
+    nextCursor: hasMore ? page[0]?.createdAt.toISOString() ?? null : null,
+    hasMore,
+  });
 });
 
 // Vercel's zero-configuration Hono integration uses this default export.

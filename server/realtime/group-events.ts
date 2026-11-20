@@ -18,6 +18,18 @@ export type GroupEvent =
       type: "group_member_removed";
       groupId: string;
       memberId: string;
+    }
+  | {
+      type: "notification_created";
+      userId: string;
+      notification: {
+        id: string;
+        type: string;
+        title: string;
+        body: string;
+        data: Record<string, string> | null;
+        createdAt: Date;
+      };
     };
 
 const channel = "chat:group-events";

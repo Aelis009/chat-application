@@ -17,12 +17,16 @@ export default function AppNavigation() {
   const {
     conversations,
     requests,
+    notifications,
     logout,
   } = useChat();
   const unreadCount = conversations.reduce(
     (total, conversation) => total + conversation.unreadCount,
     0
   );
+  const unreadNotificationCount = notifications.filter(
+    (notification) => !notification.readAt
+  ).length;
 
   return (
     <nav className="app-nav" aria-label="Main navigation">
@@ -55,6 +59,11 @@ export default function AppNavigation() {
               requests.incoming.length > 0 ? (
                 <span className="app-nav-badge">
                   {requests.incoming.length}
+                </span>
+              ) : null}
+              {item.href === "/notifications" && unreadNotificationCount > 0 ? (
+                <span className="app-nav-badge">
+                  {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
                 </span>
               ) : null}
             </Link>

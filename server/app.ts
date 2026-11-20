@@ -4,8 +4,16 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "./db.js";
-import { friendRequests, messages, users } from "./schema.js";
+import {
+  friendRequests,
+  groupMembers,
+  groupMessages,
+  groups,
+  messages,
+  users,
+} from "./schema.js";
 import { areFriends } from "./friendship.js";
+import { publishGroupEvent } from "./group-events.js";
 import { getAllowedOrigins } from "./cors.js";
 import {
   authMiddleware,
@@ -59,12 +67,37 @@ const friendRequestIdSchema = z.string().uuid("Invalid friend request id");
 
 const friendIdSchema = z.string().uuid("Invalid friend id");
 
+const groupIdSchema = z.string().uuid("Invalid group id");
+
+const createGroupSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  memberIds: z.array(z.string().uuid()).min(1).max(50),
+});
+
+const groupMessageSchema = z.object({
+  content: z.string().trim().min(1).max(2000),
+});
+
+const updateGroupSchema = z
+  .object({
+    name: z.string().trim().min(2).max(100).optional(),
+    onlyAdminsCanSend: z.boolean().optional(),
+  })
+  .refine((value) => value.name !== undefined || value.onlyAdminsCanSend !== undefined);
+
+const updateGroupMemberSchema = z.object({
+  role: z.enum(["admin", "member"]),
+});
+
 type PublicUser = {
   id: string;
   name: string;
   email: string;
 };
 
+type PublicGroupMember = PublicUser & {
+  role: "owner" | "admin" | "member";
+};
 
 async function getUsersByIds(userIds: string[]): Promise<Map<string, PublicUser>> {
   if (userIds.length === 0) {
@@ -140,6 +173,21 @@ async function getAcceptedFriendIds(userId: string) {
       )
     ),
   ];
+}
+
+async function getGroupMembership(groupId: string, userId: string) {
+  const [membership] = await db
+    .select({ id: groupMembers.id, role: groupMembers.role })
+    .from(groupMembers)
+    .where(
+      and(eq(groupMembers.groupId, groupId), eq(groupMembers.userId, userId))
+    )
+    .limit(1);
+  return membership;
+}
+
+function isGroupAdmin(role: string) {
+  return role === "owner" || role === "admin";
 }
 
 app.get("/", (c) => {
@@ -594,6 +642,275 @@ app.get("/v1/friends", authMiddleware, async (c) => {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   return c.json({ friends });
+});
+
+// ---------- Groups ----------
+
+app.get("/v1/groups", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const memberships = await db
+    .select({
+      groupId: groupMembers.groupId,
+      name: groups.name,
+      createdBy: groups.createdBy,
+      createdAt: groups.createdAt,
+      onlyAdminsCanSend: groups.onlyAdminsCanSend,
+    })
+    .from(groupMembers)
+    .innerJoin(groups, eq(groupMembers.groupId, groups.id))
+    .where(eq(groupMembers.userId, me))
+    .orderBy(groups.name);
+
+  if (memberships.length === 0) {
+    return c.json({ groups: [] });
+  }
+
+  const groupIds = memberships.map((membership) => membership.groupId);
+  const memberRows = await db
+    .select({
+      groupId: groupMembers.groupId,
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      role: groupMembers.role,
+    })
+    .from(groupMembers)
+    .innerJoin(users, eq(groupMembers.userId, users.id))
+    .where(inArray(groupMembers.groupId, groupIds));
+
+  const membersByGroup = new Map<string, PublicGroupMember[]>();
+
+  for (const member of memberRows) {
+    const members = membersByGroup.get(member.groupId) ?? [];
+    members.push({
+      id: member.id,
+      name: member.name,
+      email: member.email,
+      role: member.role as "owner" | "admin" | "member",
+    });
+    membersByGroup.set(member.groupId, members);
+  }
+
+  return c.json({
+    groups: memberships.map((group) => ({
+      ...group,
+      members: membersByGroup.get(group.groupId) ?? [],
+    })),
+  });
+});
+
+app.post("/v1/groups", authMiddleware, async (c) => {
+  const me = c.get("userId");
+  const body = await c.req.json().catch(() => null);
+  const result = createGroupSchema.safeParse(body);
+
+  if (!result.success) {
+    return c.json({ error: "Please provide a valid group name and members" }, 400);
+  }
+
+  const memberIds = [...new Set(result.data.memberIds)].filter(
+    (memberId) => memberId !== me
+  );
+
+  if (memberIds.length === 0) {
+    return c.json({ error: "A group must include at least one friend" }, 400);
+  }
+
+  const friendIds = new Set(await getAcceptedFriendIds(me));
+
+  if (memberIds.some((memberId) => !friendIds.has(memberId))) {
+    return c.json(
+      { error: "You can only add accepted friends to a group" },
+      403
+    );
+  }
+
+  const [group] = await db
+    .insert(groups)
+    .values({
+      name: result.data.name,
+      createdBy: me,
+    })
+    .returning();
+
+  await db.insert(groupMembers).values([
+    { groupId: group.id, userId: me, role: "owner" },
+    ...memberIds.map((userId) => ({
+      groupId: group.id,
+      userId,
+      role: "member",
+    })),
+  ]);
+
+  return c.json({ message: "Group created", group }, 201);
+});
+
+app.patch("/v1/groups/:groupId", authMiddleware, async (c) => {
+  const parsedGroupId = groupIdSchema.safeParse(c.req.param("groupId"));
+  const body = await c.req.json().catch(() => null);
+  const result = updateGroupSchema.safeParse(body);
+
+  if (!parsedGroupId.success || !result.success) {
+    return c.json({ error: "Please provide valid group settings" }, 400);
+  }
+
+  const membership = await getGroupMembership(
+    parsedGroupId.data,
+    c.get("userId")
+  );
+
+  if (!membership || !isGroupAdmin(membership.role)) {
+    return c.json({ error: "Only group admins can change group settings" }, 403);
+  }
+
+  const [updatedGroup] = await db
+    .update(groups)
+    .set(result.data)
+    .where(eq(groups.id, parsedGroupId.data))
+    .returning();
+
+  await publishGroupEvent({
+    type: "group_updated",
+    groupId: parsedGroupId.data,
+    changedBy: c.get("userId"),
+    changes: result.data,
+  });
+
+  return c.json({ message: "Group updated", group: updatedGroup });
+});
+
+app.patch(
+  "/v1/groups/:groupId/members/:memberId",
+  authMiddleware,
+  async (c) => {
+    const parsedGroupId = groupIdSchema.safeParse(c.req.param("groupId"));
+    const parsedMemberId = friendIdSchema.safeParse(c.req.param("memberId"));
+    const body = await c.req.json().catch(() => null);
+    const result = updateGroupMemberSchema.safeParse(body);
+
+    if (!parsedGroupId.success || !parsedMemberId.success || !result.success) {
+      return c.json({ error: "Invalid group member update" }, 400);
+    }
+
+    const adminMembership = await getGroupMembership(
+      parsedGroupId.data,
+      c.get("userId")
+    );
+    if (!adminMembership || !isGroupAdmin(adminMembership.role)) {
+      return c.json({ error: "Only group admins can manage members" }, 403);
+    }
+
+    const member = await getGroupMembership(
+      parsedGroupId.data,
+      parsedMemberId.data
+    );
+    if (!member) {
+      return c.json({ error: "Group member not found" }, 404);
+    }
+    if (member.role === "owner") {
+      return c.json({ error: "The group owner role cannot be changed" }, 400);
+    }
+
+    await db
+      .update(groupMembers)
+      .set({ role: result.data.role })
+      .where(
+        and(
+          eq(groupMembers.groupId, parsedGroupId.data),
+          eq(groupMembers.userId, parsedMemberId.data)
+        )
+      );
+
+    await publishGroupEvent({
+      type: "group_member_role_updated",
+      groupId: parsedGroupId.data,
+      memberId: parsedMemberId.data,
+      role: result.data.role,
+    });
+
+    return c.json({ message: "Member role updated" });
+  }
+);
+
+app.delete(
+  "/v1/groups/:groupId/members/:memberId",
+  authMiddleware,
+  async (c) => {
+    const parsedGroupId = groupIdSchema.safeParse(c.req.param("groupId"));
+    const parsedMemberId = friendIdSchema.safeParse(c.req.param("memberId"));
+
+    if (!parsedGroupId.success || !parsedMemberId.success) {
+      return c.json({ error: "Invalid group member" }, 400);
+    }
+
+    const adminMembership = await getGroupMembership(
+      parsedGroupId.data,
+      c.get("userId")
+    );
+    if (!adminMembership || !isGroupAdmin(adminMembership.role)) {
+      return c.json({ error: "Only group admins can remove members" }, 403);
+    }
+
+    const member = await getGroupMembership(
+      parsedGroupId.data,
+      parsedMemberId.data
+    );
+    if (!member) {
+      return c.json({ error: "Group member not found" }, 404);
+    }
+    if (member.role === "owner") {
+      return c.json({ error: "The group owner cannot be removed" }, 400);
+    }
+
+    await db
+      .delete(groupMembers)
+      .where(
+        and(
+          eq(groupMembers.groupId, parsedGroupId.data),
+          eq(groupMembers.userId, parsedMemberId.data)
+        )
+      );
+
+    await publishGroupEvent({
+      type: "group_member_removed",
+      groupId: parsedGroupId.data,
+      memberId: parsedMemberId.data,
+    });
+
+    return c.json({ message: "Member removed" });
+  }
+);
+
+app.get("/v1/groups/:groupId/messages", authMiddleware, async (c) => {
+  const parsedGroupId = groupIdSchema.safeParse(c.req.param("groupId"));
+
+  if (!parsedGroupId.success) {
+    return c.json({ error: "Invalid group id" }, 400);
+  }
+
+  const membership = await getGroupMembership(
+    parsedGroupId.data,
+    c.get("userId")
+  );
+
+  if (!membership) {
+    return c.json({ error: "You are not a member of this group" }, 403);
+  }
+
+  const messageRows = await db
+    .select({
+      id: groupMessages.id,
+      groupId: groupMessages.groupId,
+      senderId: groupMessages.senderId,
+      content: groupMessages.content,
+      createdAt: groupMessages.createdAt,
+    })
+    .from(groupMessages)
+    .where(eq(groupMessages.groupId, parsedGroupId.data))
+    .orderBy(desc(groupMessages.createdAt))
+    .limit(100);
+
+  return c.json({ messages: messageRows.reverse() });
 });
 
 app.delete("/v1/friends/:friendId", authMiddleware, async (c) => {

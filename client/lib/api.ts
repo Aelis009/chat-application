@@ -85,6 +85,35 @@ export type MessagesResponse = {
   messages: Message[];
 };
 
+export type GroupMessage = {
+  id: string;
+  groupId: string;
+  senderId: string;
+  content: string;
+  createdAt: string;
+};
+
+export type GroupMember = User & {
+  role: "owner" | "admin" | "member";
+};
+
+export type Group = {
+  groupId: string;
+  name: string;
+  createdBy: string;
+  createdAt: string;
+  onlyAdminsCanSend: boolean;
+  members: GroupMember[];
+};
+
+export type GroupsResponse = {
+  groups: Group[];
+};
+
+export type GroupMessagesResponse = {
+  messages: GroupMessage[];
+};
+
 export class ApiError extends Error {
   status: number;
 

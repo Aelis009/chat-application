@@ -1,9 +1,11 @@
 import type { Namespace } from "socket.io";
 import { z } from "zod";
+import { and, eq } from "drizzle-orm";
 import { COOKIE_NAME, getCookieValue, verifyToken } from "./auth.js";
 import { db } from "./db.js";
 import { areFriends } from "./friendship.js";
-import { messages } from "./schema.js";
+import { groupMembers, groupMessages, groups, messages } from "./schema.js";
+import { subscribeToGroupEvents } from "./group-events.js";
 
 const sendMessageSchema = z.object({
   receiverId: z.string().uuid("Invalid receiver id"),
@@ -12,6 +14,11 @@ const sendMessageSchema = z.object({
     .trim()
     .min(1, "Message cannot be empty")
     .max(2000, "Message is too long"),
+});
+
+const sendGroupMessageSchema = z.object({
+  groupId: z.string().uuid("Invalid group id"),
+  content: z.string().trim().min(1, "Message cannot be empty").max(2000),
 });
 
 type PrivateSocketData = {
@@ -23,6 +30,10 @@ function userRoom(userId: string) {
 }
 
 export function setupPrivateChat(io: Namespace) {
+  subscribeToGroupEvents((event) => {
+    io.to(`group:${event.groupId}`).emit(event.type, event);
+  });
+
   // fetchSockets() reads through the active adapter. With the Redis adapter
   // enabled, this includes sockets connected to other Vercel instances.
   async function broadcastOnlineUsers() {
@@ -70,6 +81,18 @@ export function setupPrivateChat(io: Namespace) {
     const userId = (socket.data as PrivateSocketData).userId;
 
     socket.join(userRoom(userId));
+    void db
+      .select({ groupId: groupMembers.groupId })
+      .from(groupMembers)
+      .where(eq(groupMembers.userId, userId))
+      .then((memberships) => {
+        for (const membership of memberships) {
+          socket.join(`group:${membership.groupId}`);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to join group rooms:", error);
+      });
     void broadcastOnlineUsers();
 
     console.log("Private chat connected:", userId);
@@ -124,6 +147,88 @@ export function setupPrivateChat(io: Namespace) {
         socket.emit("chat_error", {
           message: "Message could not be sent",
         });
+      }
+    });
+
+    socket.on("send_group_message", async (payload) => {
+      try {
+        const result = sendGroupMessageSchema.safeParse(payload);
+
+        if (!result.success) {
+          socket.emit("chat_error", {
+            message: result.error.issues[0]?.message ?? "Invalid message",
+          });
+
+          return;
+        }
+
+        const [membership] = await db
+          .select({
+            id: groupMembers.id,
+            role: groupMembers.role,
+            onlyAdminsCanSend: groups.onlyAdminsCanSend,
+          })
+          .from(groupMembers)
+          .innerJoin(groups, eq(groupMembers.groupId, groups.id))
+          .where(
+            and(
+              eq(groupMembers.groupId, result.data.groupId),
+              eq(groupMembers.userId, userId)
+            )
+          )
+          .limit(1);
+
+        if (!membership) {
+          socket.emit("chat_error", {
+            message: "You are not a member of this group",
+          });
+          return;
+        }
+        if (membership.onlyAdminsCanSend && membership.role === "member") {
+          socket.emit("chat_error", {
+            message: "Only group admins can send messages in this group",
+          });
+          return;
+        }
+
+        const [savedMessage] = await db
+          .insert(groupMessages)
+          .values({
+            groupId: result.data.groupId,
+            senderId: userId,
+            content: result.data.content,
+          })
+          .returning();
+
+        io.to(`group:${result.data.groupId}`).emit(
+          "receive_group_message",
+          savedMessage
+        );
+      } catch (error) {
+        console.error("Failed to send group message:", error);
+        socket.emit("chat_error", {
+          message: "Group message could not be sent",
+        });
+      }
+    });
+
+    socket.on("join_group", async (payload) => {
+      const result = z.object({ groupId: z.string().uuid() }).safeParse(payload);
+      if (!result.success) return;
+
+      const [membership] = await db
+        .select({ id: groupMembers.id })
+        .from(groupMembers)
+        .where(
+          and(
+            eq(groupMembers.groupId, result.data.groupId),
+            eq(groupMembers.userId, userId)
+          )
+        )
+        .limit(1);
+
+      if (membership) {
+        socket.join(`group:${result.data.groupId}`);
       }
     });
 

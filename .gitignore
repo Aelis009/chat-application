@@ -18,7 +18,8 @@ build/
 # Logs
 *.log
 
-.docs/
+docs/
+
 # TypeScript
 *.tsbuildinfo
 

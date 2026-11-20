@@ -79,7 +79,7 @@ const createGroupSchema = z.object({
 });
 
 const groupMessageSchema = z.object({
-  content: z.string().trim().min(1).max(2000),
+  content: z.string().trim().min(1).max(10000),
 });
 
 const updateGroupSchema = z

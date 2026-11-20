@@ -158,7 +158,7 @@ socket.emit("send_group_message", {
 Validation:
 
 - `groupId` must be a UUID.
-- `content` is trimmed and must contain 1–2,000 characters.
+- `content` is trimmed and must contain 1–10,000 characters.
 - The sender must be a current group member.
 - A regular member is rejected when `onlyAdminsCanSend` is enabled.
 

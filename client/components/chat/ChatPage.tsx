@@ -6,6 +6,7 @@ import type { Conversation, Group, Message } from "@/lib/api";
 import UserAvatar from "@/components/chat/UserAvatar";
 
 const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
+const MAX_MESSAGE_LENGTH = 10000;
 
 function formatMessageTime(value: string) {
   const date = new Date(value);
@@ -47,6 +48,7 @@ export default function ChatPage() {
     removeFriend,
   } = useChat();
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
+  const messageInputRef = useRef<HTMLInputElement | null>(null);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingOlderRef = useRef(false);
   const nearBottomRef = useRef(true);
@@ -434,7 +436,7 @@ export default function ChatPage() {
                         <em>Message deleted</em>
                       ) : editingMessageId === message.id ? (
                         <div className="message-edit-form">
-                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={2000} />
+                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} />
                           <button className="button button-primary button-small" type="button" onClick={() => saveEditing(false)}>Save</button>
                           <button className="button button-ghost button-small" type="button" onClick={() => setEditingMessageId(null)}>Cancel</button>
                         </div>
@@ -489,7 +491,7 @@ export default function ChatPage() {
                         <em>Message deleted</em>
                       ) : editingMessageId === message.id ? (
                         <div className="message-edit-form">
-                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={2000} />
+                          <input className="input" value={editingContent} onChange={(event) => setEditingContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} />
                           <button className="button button-primary button-small" type="button" onClick={() => saveEditing(true)}>Save</button>
                           <button className="button button-ghost button-small" type="button" onClick={() => setEditingMessageId(null)}>Cancel</button>
                         </div>
@@ -531,14 +533,25 @@ export default function ChatPage() {
             </div>
 
             <footer className="chat-footer">
-              <form className="message-form" onSubmit={(event) => selectedFriend ? sendMessage(event) : sendGroupMessage(event)}>
+              <form
+                className="message-form"
+                onSubmit={(event) => {
+                  if (selectedFriend) {
+                    sendMessage(event);
+                  } else {
+                    sendGroupMessage(event);
+                  }
+                  requestAnimationFrame(() => messageInputRef.current?.focus());
+                }}
+              >
                 <input
+                  ref={messageInputRef}
                   className="input"
                   type="text"
                   value={selectedFriend ? draft : groupDraft}
                   onChange={(event) => selectedFriend ? setDraft(event.target.value) : setGroupDraft(event.target.value)}
                   placeholder={!canSendGroupMessage ? "Only admins can send messages" : socketConnected ? `Message ${selectedFriend?.name ?? selectedGroup?.name}...` : "Connecting..."}
-                  maxLength={2000}
+                  maxLength={MAX_MESSAGE_LENGTH}
                   autoComplete="off"
                   disabled={!socketConnected || !canSendGroupMessage}
                 />

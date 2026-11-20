@@ -392,6 +392,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         notification,
         ...previous.filter((item) => item.id !== notification.id),
       ]);
+      if (
+        notification.type === "friend_request" ||
+        notification.type === "friend_request_accepted"
+      ) {
+        void refresh();
+      }
       showTemporaryNotice(notification.title);
     }
 

@@ -13,17 +13,17 @@ const sendMessageSchema = z.object({
     .string()
     .trim()
     .min(1, "Message cannot be empty")
-    .max(2000, "Message is too long"),
+    .max(10000, "Message is too long"),
 });
 
 const sendGroupMessageSchema = z.object({
   groupId: z.string().uuid("Invalid group id"),
-  content: z.string().trim().min(1, "Message cannot be empty").max(2000),
+  content: z.string().trim().min(1, "Message cannot be empty").max(10000),
 });
 
 const messageMutationSchema = z.object({
   messageId: z.string().uuid(),
-  content: z.string().trim().min(1).max(2000).optional(),
+  content: z.string().trim().min(1).max(10000).optional(),
 });
 
 const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
